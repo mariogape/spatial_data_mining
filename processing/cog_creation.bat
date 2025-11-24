@@ -13,8 +13,8 @@ REM --------------------------
 REM USER SETTINGS (EDIT THIS)
 REM --------------------------
 
-set "INPUT_FOLDER=D:\OpenPas Spatial Data\Soil\masked"
-set "OUTPUT_FOLDER=D:\OpenPas Spatial Data\Soil\cog"
+set "INPUT_FOLDER=D:\OpenPas Spatial Data\Insolation"
+set "OUTPUT_FOLDER=D:\OpenPas Spatial Data\Soil\Insolation\cog"
 
 REM Allowed: float32, int16, int8  (or leave empty "")
 set "USER_DTYPE="
@@ -129,19 +129,8 @@ REM --------------------------
 REM MAIN LOOP
 REM --------------------------
 
-pushd "%INPUT_FOLDER%"
-if errorlevel 1 (
-    echo [ERROR] Could not access input folder.
-    goto END
-)
-
-REM Process *.tif
-for %%F in (*.tif) do call :PROCESS_ONE "%%F"
-
-REM Process *.tiff
-for %%F in (*.tiff) do call :PROCESS_ONE "%%F"
-
-popd
+REM Process *.tif and *.tiff recursively
+for /r "%INPUT_FOLDER%" %%F in (*.tif *.tiff) do call :PROCESS_ONE "%%~fF"
 
 echo(
 echo [DONE] Batch COG creation finished.
