@@ -2,7 +2,10 @@ import logging
 from pathlib import Path
 from typing import List, Dict, Any
 
-from spatial_data_mining.config import load_job_config
+from spatial_data_mining.config import (
+    load_job_config,
+    load_job_config_from_dict,
+)
 from spatial_data_mining.load.cog import write_cog
 from spatial_data_mining.load.gcs import upload_to_gcs
 from spatial_data_mining.utils.aoi import load_aoi, get_aoi_geometries
@@ -10,8 +13,7 @@ from spatial_data_mining.utils.logging import setup_logging
 from spatial_data_mining.variables.registry import get_variable
 
 
-def run_pipeline(config_path: str) -> List[Dict[str, Any]]:
-    job_cfg, logging_cfg = load_job_config(config_path)
+def _run(job_cfg, logging_cfg) -> List[Dict[str, Any]]:
     setup_logging(logging_cfg)
     logger = logging.getLogger("orchestrator")
 
@@ -67,3 +69,16 @@ def run_pipeline(config_path: str) -> List[Dict[str, Any]]:
 
     logger.info("Job %s completed. Outputs: %s", job_cfg.name, results)
     return results
+
+
+def run_pipeline(config_path: str) -> List[Dict[str, Any]]:
+    job_cfg, logging_cfg = load_job_config(config_path)
+    return _run(job_cfg, logging_cfg)
+
+
+def run_pipeline_from_dict(job_section: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """
+    Run pipeline directly from an in-memory job dict (no YAML needed).
+    """
+    job_cfg, logging_cfg = load_job_config_from_dict(job_section)
+    return _run(job_cfg, logging_cfg)

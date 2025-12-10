@@ -6,6 +6,7 @@ xarray
 shapely
 pyproj
 pydantic
-click
 loguru
 google-cloud-storage
+pyyaml
+streamlit

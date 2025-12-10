@@ -45,6 +45,23 @@ def _load_yaml(path: Path) -> Dict[str, Any]:
         return yaml.safe_load(f) or {}
 
 
+def _merge_job(
+    base_defaults: Dict[str, Any], job_section: Dict[str, Any]
+) -> Tuple[JobConfig, List[str]]:
+    allowed_crs = base_defaults.get("allowed_crs", [])
+    base_fields = {
+        k: v for k, v in base_defaults.items() if k not in ("storage", "allowed_crs")
+    }
+    merged_storage = {**base_defaults.get("storage", {}), **job_section.get("storage", {})}
+    merged_job = {**base_fields, **job_section, "storage": merged_storage}
+    job_cfg = JobConfig(**merged_job)
+    if allowed_crs and job_cfg.target_crs not in allowed_crs:
+        raise ValueError(
+            f"target_crs {job_cfg.target_crs} not in allowed list: {allowed_crs}"
+        )
+    return job_cfg, allowed_crs
+
+
 def load_job_config(
     job_config_path: str, base_config_path: str = "config/base.yaml"
 ) -> Tuple[JobConfig, Dict[str, Any]]:
@@ -57,20 +74,20 @@ def load_job_config(
     logging_cfg = base_data.get("logging", {})
     job_section = job_data.get("job", {})
 
-    allowed_crs = base_defaults.get("allowed_crs", [])
+    job_cfg, _ = _merge_job(base_defaults, job_section)
+    return job_cfg, logging_cfg
 
-    base_fields = {
-        k: v
-        for k, v in base_defaults.items()
-        if k not in ("storage", "allowed_crs")
-    }
-    merged_storage = {**base_defaults.get("storage", {}), **job_section.get("storage", {})}
-    merged_job = {**base_fields, **job_section, "storage": merged_storage}
 
-    job_cfg = JobConfig(**merged_job)
-    if allowed_crs and job_cfg.target_crs not in allowed_crs:
-        raise ValueError(
-            f"target_crs {job_cfg.target_crs} not in allowed list: {allowed_crs}"
-        )
-
+def load_job_config_from_dict(
+    job_section: Dict[str, Any], base_config_path: str = "config/base.yaml"
+) -> Tuple[JobConfig, Dict[str, Any]]:
+    """
+    Same as load_job_config, but takes a dict instead of a YAML path.
+    Useful for UI-driven runs where config is built on the fly.
+    """
+    base_path = Path(base_config_path)
+    base_data = _load_yaml(base_path) if base_path.exists() else {}
+    base_defaults = base_data.get("defaults", {})
+    logging_cfg = base_data.get("logging", {})
+    job_cfg, _ = _merge_job(base_defaults, job_section)
     return job_cfg, logging_cfg
