@@ -2,6 +2,7 @@ from pathlib import Path
 from typing import Any
 
 import rioxarray
+from rasterio.enums import Resampling
 from shapely.geometry import mapping
 
 
@@ -23,7 +24,7 @@ def process_raster_to_target(
     data = data.rio.reproject(
         target_crs,
         resolution=resolution_m,
-        resampling="bilinear",  # use string to avoid GDAL enum mismatch
+        resampling=Resampling.bilinear,
     )
     data = data.rio.clip([mapping(aoi_geom_target)], target_crs, drop=True)
     data.rio.to_raster(processed_path, compress="deflate")
