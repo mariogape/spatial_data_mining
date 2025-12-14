@@ -95,6 +95,9 @@ class AlphaEarthExtractor:
 
     def _merge_tiles(self, tile_paths: List[Path], name: str, tmp_dir: Path) -> Path:
         out_path = tmp_dir / f"{name}_merged.tif"
+        merge_dtype = "float32"  # force float32 to reduce memory footprint during merge
+
+        # Prep tiles (flip south-up) while staying on the caller-provided disk.
         prepared_paths: List[Path] = []
         for p in tile_paths:
             with rasterio.open(p) as src:
@@ -115,18 +118,25 @@ class AlphaEarthExtractor:
 
         srcs = [rasterio.open(p) for p in prepared_paths]
         try:
-            mosaic, transform = rio_merge(srcs)
+            # Merge one band at a time to stay within low-RAM machines (~120MB per band).
+            first_band = 1
+            first_mosaic, transform = rio_merge(srcs, indexes=first_band, dtype=merge_dtype)
             meta = srcs[0].meta.copy()
             meta.update(
                 {
-                    "height": mosaic.shape[1],
-                    "width": mosaic.shape[2],
+                    "height": first_mosaic.shape[1],
+                    "width": first_mosaic.shape[2],
                     "transform": transform,
-                    "count": mosaic.shape[0],
+                    "count": srcs[0].count,
+                    "dtype": merge_dtype,
                 }
             )
+
             with rasterio.open(out_path, "w", **meta) as dst:
-                dst.write(mosaic)
+                dst.write(first_mosaic, first_band)
+                for band in range(2, srcs[0].count + 1):
+                    mosaic, _ = rio_merge(srcs, indexes=band, dtype=merge_dtype)
+                    dst.write(mosaic, band)
         finally:
             for s in srcs:
                 s.close()
