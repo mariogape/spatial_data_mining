@@ -35,6 +35,15 @@ VARIABLE_METADATA = {
         "temporal_resolution": "annual",
         "season_options": ["static"],
     },
+    "clcplus": {
+        "source": "CLCplus (user-provided, one raster per country)",
+        "native_resolution_m": 10,
+        "calculation": "Manual ingestion of provided CLCplus classification raster",
+        "notes": "Provide the local CLCplus folder; values 0 and nodata are remapped to -999.",
+        "temporal_coverage": {"start_year": 2018, "end_year": 2018},
+        "temporal_resolution": "static",
+        "season_options": ["static"],
+    },
 }
 
 

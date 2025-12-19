@@ -10,29 +10,17 @@ from shapely.geometry import mapping, box
 logger = logging.getLogger(__name__)
 
 
-def process_raster_to_target(
-    src_path: Path,
-    target_crs: str,
-    resolution_m: float | None,
-    aoi_geom_target: Any,
-) -> Path:
+def _normalize_spatial_dims(data):
     """
-    Reproject, resample, and clip to the target AOI/CRS.
-    Returns a path to a temporary GeoTIFF in the target CRS.
+    Ensure rioxarray data uses x/y spatial dims even if named differently.
     """
-    src_path = Path(src_path)
-    processed_path = src_path.with_name(f"{src_path.stem}_processed.tif")
-
-    data = rioxarray.open_rasterio(src_path, masked=True)
     # Only squeeze non-spatial singleton dims (e.g., band), keep spatial dims even if size 1.
     if "band" in data.dims and data.sizes.get("band", 0) == 1:
         data = data.squeeze("band", drop=True)
     if "variable" in data.dims and data.sizes.get("variable", 0) == 1:
         data = data.squeeze("variable", drop=True)
 
-    # Make sure spatial dimensions are recognized as x/y even if named differently.
     if "x" not in data.dims or "y" not in data.dims:
-        # Prefer non-band dims; otherwise fallback to the last two dims.
         spatial_dims = [d for d in data.dims if d not in ("band", "variable")]
         if len(spatial_dims) >= 2:
             y_dim, x_dim = spatial_dims[-2:]
@@ -48,11 +36,13 @@ def process_raster_to_target(
             rename_map[y_dim] = "y"
         if rename_map:
             data = data.rename(rename_map)
-    data = data.rio.set_spatial_dims(x_dim="x", y_dim="y", inplace=False)
+    return data.rio.set_spatial_dims(x_dim="x", y_dim="y", inplace=False)
 
+
+def _reproject_raster(data, target_crs: str, resolution_m: float | None, resampling: Resampling):
     reproject_kwargs = {
         "dst_crs": target_crs,
-        "resampling": Resampling.bilinear,
+        "resampling": resampling,
     }
     if resolution_m is not None:
         reproject_kwargs["resolution"] = resolution_m
@@ -74,25 +64,77 @@ def process_raster_to_target(
         except Exception as exc:
             logger.warning("Falling back to default transform when preserving native grid: %s", exc)
 
-    data = data.rio.reproject(**reproject_kwargs)
+    return data.rio.reproject(**reproject_kwargs)
 
-    # Clip with fallbacks: try normal clip, then all_touched, then skip clip if intersection exists.
+
+def _clip_to_aoi(data, target_crs: str, aoi_geom_target: Any):
     aoi_geom = aoi_geom_target
     try:
-        data = data.rio.clip([mapping(aoi_geom)], target_crs, drop=True)
+        return data.rio.clip([mapping(aoi_geom)], target_crs, drop=True)
     except Exception as exc:
         logger.warning("Clip failed (%s); retrying with all_touched=True", exc)
         try:
-            data = data.rio.clip([mapping(aoi_geom)], target_crs, drop=True, all_touched=True)
+            return data.rio.clip([mapping(aoi_geom)], target_crs, drop=True, all_touched=True)
         except Exception as exc2:
-            # If raster and AOI intersect but clip still fails, keep un-clipped to avoid hard fail.
             try:
                 raster_box = box(*data.rio.bounds())
                 if not raster_box.intersects(aoi_geom):
                     raise
                 logger.warning("Clip failed again (%s); writing un-clipped raster as fallback", exc2)
+                return data
             except Exception:
                 raise
+
+
+def process_raster_to_target(
+    src_path: Path,
+    target_crs: str,
+    resolution_m: float | None,
+    aoi_geom_target: Any,
+) -> Path:
+    """
+    Reproject, resample, and clip to the target AOI/CRS.
+    Returns a path to a temporary GeoTIFF in the target CRS.
+    """
+    src_path = Path(src_path)
+    processed_path = src_path.with_name(f"{src_path.stem}_processed.tif")
+
+    data = rioxarray.open_rasterio(src_path, masked=True)
+    data = _normalize_spatial_dims(data)
+    data = _reproject_raster(data, target_crs, resolution_m, Resampling.bilinear)
+    data = _clip_to_aoi(data, target_crs, aoi_geom_target)
+
+    data.rio.to_raster(processed_path, compress="deflate")
+
+    return processed_path
+
+
+def process_clcplus_to_target(
+    src_path: Path,
+    target_crs: str,
+    resolution_m: float | None,
+    aoi_geom_target: Any,
+) -> Path:
+    """
+    Reproject CLCplus rasters with nearest-neighbor resampling, clip to AOI,
+    and recode 0 / nodata pixels to -999 before writing a GeoTIFF.
+    """
+    src_path = Path(src_path)
+    processed_path = src_path.with_name(f"{src_path.stem}_processed.tif")
+
+    data = rioxarray.open_rasterio(src_path, masked=True)
+    data = _normalize_spatial_dims(data)
+    data = _reproject_raster(data, target_crs, resolution_m, Resampling.nearest)
+    data = _clip_to_aoi(data, target_crs, aoi_geom_target)
+
+    # Recode nodata and zero values to -999 and preserve integer semantics.
+    data = data.fillna(-999)
+    data = data.where(data != 0, other=-999)
+    try:
+        data = data.astype("int32")
+        data.rio.write_nodata(-999, inplace=True)
+    except Exception as exc:  # best-effort typing/nodata; continue even if write_nodata fails
+        logger.warning("Could not enforce nodata/-999 typing on CLCplus raster: %s", exc)
 
     data.rio.to_raster(processed_path, compress="deflate")
 

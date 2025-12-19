@@ -27,6 +27,7 @@ class JobConfig(BaseModel):
     aoi_path: str
     target_crs: str = Field(pattern=r"EPSG:\d+")
     resolution_m: float | None
+    clcplus_input_dir: str | None = None
     year: int | None = None
     years: List[int] | None = None
     season: str
@@ -71,6 +72,18 @@ class JobConfig(BaseModel):
 
         model.year = unique_years[0]
         model.years = unique_years
+        return model
+
+    @model_validator(mode="after")
+    def validate_clcplus_inputs(cls, model: "JobConfig") -> "JobConfig":
+        vars_lower = [v.lower() for v in model.variables]
+        if "clcplus" in vars_lower:
+            if not model.clcplus_input_dir:
+                raise ValueError("clcplus_input_dir is required when requesting the clcplus variable")
+            input_dir = Path(model.clcplus_input_dir)
+            if not input_dir.exists() or not input_dir.is_dir():
+                raise ValueError(f"clcplus_input_dir must be an existing directory: {input_dir}")
+            model.clcplus_input_dir = str(input_dir.resolve())
         return model
 
 

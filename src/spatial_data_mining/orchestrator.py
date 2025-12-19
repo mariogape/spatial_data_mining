@@ -60,7 +60,7 @@ def _run(
                 _check_stop()
                 logger.info("Processing variable %s for year %s", var_name, year)
                 _notify(progress_cb, f"Processing {var_name} ({year})...")
-                var_def = get_variable(var_name)
+                var_def = get_variable(var_name, job_cfg=job_cfg)
                 extractor = var_def["extractor"]
                 transform_fn = var_def["transform"]
 
