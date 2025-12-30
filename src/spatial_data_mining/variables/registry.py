@@ -10,6 +10,7 @@ VARIABLES = {
     "ndvi": {"extractor_factory": lambda _job=None: GEEExtractor("NDVI"), "transform": process_raster_to_target},
     "ndmi": {"extractor_factory": lambda _job=None: GEEExtractor("NDMI"), "transform": process_raster_to_target},
     "msi": {"extractor_factory": lambda _job=None: GEEExtractor("MSI"), "transform": process_raster_to_target},
+    "bsi": {"extractor_factory": lambda _job=None: GEEExtractor("BSI"), "transform": process_raster_to_target},
     "alpha_earth": {
         "extractor_factory": lambda _job=None: AlphaEarthExtractor(),
         "transform": process_raster_to_target,

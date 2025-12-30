@@ -31,7 +31,7 @@ Config-driven geospatial ETL for extracting indices from Google Earth Engine (an
    - Select AOI (dropdown lists files in `data/aoi/`, or enter a custom path).  
    - Choose CRS (EPSG:3035, 4326, 3857, 25829, 25830, 25831) and pixel resolution.  
    - Set year(s) + season (multi-select supported).  
-   - Pick variables: ndvi, ndmi, msi (any combo).  
+   - Pick variables: ndvi, ndmi, msi, bsi (any combo).  
    - Storage: local COG directory or GCS bucket/prefix.  
    - Click “Run pipeline” to execute (logs/outputs shown below the button).  
 7) Verify outputs:
@@ -44,7 +44,7 @@ Config-driven geospatial ETL for extracting indices from Google Earth Engine (an
 - CRS: EPSG:3035, 4326, 3857, 25829, 25830, 25831.
 - Resolution: target pixel size (meters).
 - Time: acquisition `year` (or multiple `years`) and descriptive `season`.
-- Variables: ND-based indices (ndvi, ndmi, msi).
+- Variables: Sentinel-2 indices (ndvi, ndmi, msi, bsi).
 - Storage: local COG output directory or GCS bucket/prefix.
 
 ## Repo structure (key folders)

@@ -24,13 +24,15 @@ class StorageConfig(BaseModel):
 
 class JobConfig(BaseModel):
     name: str
-    aoi_path: str
+    aoi_path: str | None = None
+    aoi_paths: List[str] | None = None
     target_crs: str = Field(pattern=r"EPSG:\d+")
     resolution_m: float | None
     clcplus_input_dir: str | None = None
     year: int | None = None
     years: List[int] | None = None
-    season: str
+    season: str | None = None
+    seasons: List[str] | None = None
     variables: List[str]
     storage: StorageConfig
 
@@ -49,6 +51,50 @@ class JobConfig(BaseModel):
         if value <= 0:
             raise ValueError("resolution_m must be positive when provided")
         return value
+
+    @model_validator(mode="after")
+    def normalize_aois(cls, model: "JobConfig") -> "JobConfig":
+        paths: List[str] = []
+        if model.aoi_paths:
+            paths.extend(str(p) for p in model.aoi_paths)
+        if model.aoi_path:
+            paths.insert(0, str(model.aoi_path))
+
+        if not paths:
+            raise ValueError("Provide at least one AOI path (aoi_path or aoi_paths)")
+
+        unique_paths: List[str] = []
+        seen: set[str] = set()
+        for p in paths:
+            if p not in seen:
+                unique_paths.append(p)
+                seen.add(p)
+
+        model.aoi_path = unique_paths[0]
+        model.aoi_paths = unique_paths
+        return model
+
+    @model_validator(mode="after")
+    def normalize_seasons(cls, model: "JobConfig") -> "JobConfig":
+        seasons_combined: List[str] = []
+        if model.seasons:
+            seasons_combined.extend(str(s) for s in model.seasons)
+        if model.season:
+            seasons_combined.insert(0, str(model.season))
+
+        if not seasons_combined:
+            raise ValueError("Provide at least one season (season or seasons)")
+
+        unique_seasons: List[str] = []
+        seen: set[str] = set()
+        for s in seasons_combined:
+            if s not in seen:
+                unique_seasons.append(s)
+                seen.add(s)
+
+        model.season = unique_seasons[0]
+        model.seasons = unique_seasons
+        return model
 
     @model_validator(mode="after")
     def normalize_years(cls, model: "JobConfig") -> "JobConfig":

@@ -17,7 +17,7 @@ from affine import Affine
 import numpy as np
 
 # Starting tile size (degrees) for AlphaEarth tiling and the smallest fallback size.
-TILE_DEG = 0.2
+TILE_DEG = 0.4
 MIN_TILE_DEG = 0.005
 
 
@@ -262,6 +262,8 @@ class AlphaEarthExtractor:
             )
 
             tile_paths: List[Path] = []
+            skipped_tiles: List[int] = []
+            too_large = False
             for idx, tile_region in enumerate(tile_regions):
                 check_cancelled(should_stop)
                 tile_name = f"{name}_tile{idx}"
@@ -270,25 +272,48 @@ class AlphaEarthExtractor:
                 except Exception as exc:
                     if "total request size" in str(exc).lower():
                         last_exc = exc
+                        too_large = True
                         self.logger.info(
                             "Tile %s too large at %.3f°, will retry with smaller tiles.",
                             tile_name,
                             tile_deg,
                         )
                         break
-                    raise
+                    skipped_tiles.append(idx)
+                    self.logger.warning("Skipping tile %s at %.3f°: %s", tile_name, tile_deg, exc)
+                    self._notify(
+                        progress_cb,
+                        f"{name}: skipped tile {idx + 1}/{total_tiles} ({exc})",
+                    )
+                    continue
                 tile_paths.append(tile_path)
                 self._notify(progress_cb, f"{name}: downloaded tile {idx + 1}/{total_tiles}")
                 check_cancelled(should_stop)
 
-            if len(tile_paths) == total_tiles:
+            if too_large:
+                for p in tile_paths:
+                    try:
+                        p.unlink()
+                    except FileNotFoundError:
+                        pass
+                    except Exception as exc:
+                        self.logger.warning("Could not delete tile %s: %s", p, exc)
+                tile_deg /= 2
+                self._notify(progress_cb, f"{name}: retrying with smaller tiles ({tile_deg:.3f}°)")
+                continue
+
+            if tile_paths:
                 merged = self._merge_tiles(tile_paths, name, tmp_dir, should_stop=should_stop)
-                self._notify(progress_cb, f"{name}: merged {total_tiles} tiles")
+                if skipped_tiles:
+                    self._notify(
+                        progress_cb,
+                        f"{name}: merged {len(tile_paths)} of {total_tiles} tiles (skipped {len(skipped_tiles)})",
+                    )
+                else:
+                    self._notify(progress_cb, f"{name}: merged {total_tiles} tiles")
                 return merged, scale
 
             tile_deg /= 2
             self._notify(progress_cb, f"{name}: retrying with smaller tiles ({tile_deg:.3f}°)")
 
-        raise RuntimeError(
-            f"Could not download {name}: request still too large even after tiling"
-        ) from last_exc
+        raise RuntimeError(f"Could not download {name}: tiling attempts failed") from last_exc

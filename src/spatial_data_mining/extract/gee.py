@@ -24,7 +24,7 @@ SEASON_RANGES = {
 }
 
 # Initial tile size (degrees) and the smallest size we'll try when falling back.
-TILE_DEG = 0.2
+TILE_DEG = 0.4
 MIN_TILE_DEG = 0.01
 
 def season_date_range(year: int, season: str) -> Tuple[str, str]:
@@ -62,6 +62,17 @@ class GEEExtractor:
             return image.normalizedDifference(["B8", "B11"]).rename("ndmi")
         if self.index == "MSI":
             return image.select("B11").divide(image.select("B8")).rename("msi")
+        if self.index == "BSI":
+            # Bare Soil Index (BSI): ((SWIR + RED) - (NIR + BLUE)) / ((SWIR + RED) + (NIR + BLUE))
+            # Sentinel-2 bands: SWIR1=B11 (20m), RED=B4 (10m), NIR=B8 (10m), BLUE=B2 (10m).
+            # Start operations from SWIR to keep the output on the 20m grid.
+            swir = image.select("B11")
+            red = image.select("B4")
+            nir = image.select("B8")
+            blue = image.select("B2")
+            num = swir.add(red).subtract(nir.add(blue))
+            den = swir.add(red).add(nir.add(blue))
+            return num.divide(den).rename("bsi")
         raise ValueError(f"Unsupported index for GEEExtractor: {self.index}")
 
     def _download_image(
@@ -226,6 +237,8 @@ class GEEExtractor:
             )
 
             tile_paths: List[Path] = []
+            skipped_tiles: List[int] = []
+            too_large = False
             for idx, tile_region in enumerate(tile_regions):
                 check_cancelled(should_stop)
                 tile_name = f"{name}_tile{idx}"
@@ -240,13 +253,20 @@ class GEEExtractor:
                 except Exception as exc:
                     if "total request size" in str(exc).lower():
                         last_exc = exc
+                        too_large = True
                         self.logger.info(
                             "Tile %s too large at %.3f°, will retry with smaller tiles.",
                             tile_name,
                             tile_deg,
                         )
                         break
-                    raise
+                    skipped_tiles.append(idx)
+                    self.logger.warning("Skipping tile %s at %.3f°: %s", tile_name, tile_deg, exc)
+                    self._notify(
+                        progress_cb,
+                        f"{name}: skipped tile {idx + 1}/{total_tiles} ({exc})",
+                    )
+                    continue
                 tile_paths.append(tile_path)
                 self._notify(
                     progress_cb,
@@ -254,14 +274,30 @@ class GEEExtractor:
                 )
                 check_cancelled(should_stop)
 
-            if len(tile_paths) == total_tiles:
+            if too_large:
+                for p in tile_paths:
+                    try:
+                        p.unlink()
+                    except FileNotFoundError:
+                        pass
+                    except Exception as exc:
+                        self.logger.warning("Could not delete tile %s: %s", p, exc)
+                tile_deg /= 2
+                self._notify(progress_cb, f"{name}: retrying with smaller tiles ({tile_deg:.3f}°)")
+                continue
+
+            if tile_paths:
                 merged = self._merge_tiles(tile_paths, name, tmp_dir, should_stop=should_stop)
-                self._notify(progress_cb, f"{name}: merged {total_tiles} tiles")
+                if skipped_tiles:
+                    self._notify(
+                        progress_cb,
+                        f"{name}: merged {len(tile_paths)} of {total_tiles} tiles (skipped {len(skipped_tiles)})",
+                    )
+                else:
+                    self._notify(progress_cb, f"{name}: merged {total_tiles} tiles")
                 return merged, effective_res
 
             tile_deg /= 2
             self._notify(progress_cb, f"{name}: retrying with smaller tiles ({tile_deg:.3f}°)")
 
-        raise RuntimeError(
-            f"Could not download {name}: request still too large even after tiling"
-        ) from last_exc
+        raise RuntimeError(f"Could not download {name}: tiling attempts failed") from last_exc

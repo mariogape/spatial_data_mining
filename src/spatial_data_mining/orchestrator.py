@@ -1,4 +1,6 @@
 import logging
+import re
+import tempfile
 from pathlib import Path
 from typing import List, Dict, Any, Callable, Optional
 
@@ -21,6 +23,12 @@ def _notify(cb: ProgressCB, message: str) -> None:
         cb(message)
 
 
+def _slugify_name(name: str) -> str:
+    """Lowercase slug for filenames; collapse non-alnum to underscores."""
+    slug = re.sub(r"[^A-Za-z0-9]+", "_", str(name)).strip("_").lower()
+    return slug or "aoi"
+
+
 def _run(
     job_cfg,
     logging_cfg,
@@ -38,11 +46,6 @@ def _run(
     _notify(progress_cb, f"Loaded job: {job_cfg.name}")
     _check_stop()
 
-    aoi_gdf = load_aoi(job_cfg.aoi_path)
-    geom_wgs84, geom_target = get_aoi_geometries(aoi_gdf, job_cfg.target_crs)
-    _notify(progress_cb, "AOI loaded and reprojected.")
-    _check_stop()
-
     output_dir = Path(job_cfg.storage.output_dir or (project_root / "data/outputs"))
     if not output_dir.is_absolute():
         output_dir = project_root / output_dir
@@ -50,81 +53,174 @@ def _run(
     _check_stop()
 
     results: List[Dict[str, Any]] = []
+    errors: List[Dict[str, Any]] = []
 
-    years = job_cfg.years or ([] if job_cfg.year is None else [job_cfg.year])
+    years_val = getattr(job_cfg, "years", None)
+    seasons_val = getattr(job_cfg, "seasons", None)
+    aois_val = getattr(job_cfg, "aoi_paths", None)
+
+    years = years_val or ([] if getattr(job_cfg, "year", None) is None else [job_cfg.year])
+    seasons = seasons_val or ([] if getattr(job_cfg, "season", None) is None else [job_cfg.season])
+    aois = aois_val or ([] if getattr(job_cfg, "aoi_path", None) is None else [job_cfg.aoi_path])
+    var_slug_map: Dict[str, str] = {}
 
     try:
-        for year in years:
+        for aoi_path in aois:
             _check_stop()
-            for var_name in job_cfg.variables:
-                _check_stop()
-                logger.info("Processing variable %s for year %s", var_name, year)
-                _notify(progress_cb, f"Processing {var_name} ({year})...")
-                var_def = get_variable(var_name, job_cfg=job_cfg)
-                extractor = var_def["extractor"]
-                transform_fn = var_def["transform"]
+            try:
+                aoi_gdf = load_aoi(aoi_path)
+                geom_wgs84, geom_target = get_aoi_geometries(aoi_gdf, job_cfg.target_crs)
+                aoi_slug = _slugify_name(Path(aoi_path).stem)
+                _notify(progress_cb, f"AOI loaded and reprojected: {aoi_slug}")
+            except PipelineCancelled:
+                raise
+            except Exception as exc:
+                logger.exception("Skipping AOI %s due to error", aoi_path)
+                _notify(progress_cb, f"Skipping AOI {aoi_path}: {exc}")
+                errors.append({"aoi_path": str(aoi_path), "error": str(exc)})
+                continue
 
-                raw_result = extractor.extract(
-                    aoi_geojson=geom_wgs84,
-                    year=year,
-                    season=job_cfg.season,
-                    resolution_m=job_cfg.resolution_m,
-                    temp_dir=output_dir,
-                    progress_cb=progress_cb,
-                    should_stop=should_stop,
-                )
-                # Allow extractors to optionally return (path, effective_resolution_m)
-                if isinstance(raw_result, tuple):
-                    raw_path, effective_res = raw_result
-                else:
-                    raw_path, effective_res = raw_result, job_cfg.resolution_m
-                _notify(progress_cb, f"{var_name} ({year}): downloaded raw image {raw_path}")
+            for season in seasons:
                 _check_stop()
-
-                processed_path = transform_fn(
-                    src_path=raw_path,
-                    target_crs=job_cfg.target_crs,
-                    resolution_m=effective_res,
-                    aoi_geom_target=geom_target,
-                )
-                _notify(progress_cb, f"{var_name} ({year}): transformed to target CRS/resolution")
-                _check_stop()
-
-                filename = (
-                    f"{job_cfg.name}_{var_name}_{year}_{job_cfg.season}_"
-                    f"{job_cfg.target_crs.replace(':', '')}.tif"
-                )
-                local_output = output_dir / filename
-                write_cog(processed_path, local_output)
-                _notify(progress_cb, f"{var_name} ({year}): wrote COG {local_output}")
-                _check_stop()
-
-                gcs_uri = None
-                if job_cfg.storage.kind == "gcs_cog":
+                season_slug = _slugify_name(season)
+                for year in years:
                     _check_stop()
-                    gcs_uri = upload_to_gcs(local_output, job_cfg.storage.bucket, job_cfg.storage.prefix)
-                    logger.info("Uploaded to GCS: %s", gcs_uri)
-                    _notify(progress_cb, f"{var_name} ({year}): uploaded to {gcs_uri}")
-                    _check_stop()
+                    for var_name in job_cfg.variables:
+                        _check_stop()
+                        if var_name not in var_slug_map:
+                            var_slug_map[var_name] = _slugify_name(var_name)
+                        var_slug = var_slug_map[var_name]
+                        logger.info(
+                            "Processing variable %s for year %s season %s (AOI %s)",
+                            var_name,
+                            year,
+                            season,
+                            aoi_slug,
+                        )
+                        _notify(
+                            progress_cb,
+                            f"Processing {var_name} ({year}, {season}) for {aoi_slug}...",
+                        )
+                        var_def = get_variable(var_name, job_cfg=job_cfg)
+                        extractor = var_def["extractor"]
+                        transform_fn = var_def["transform"]
 
-                results.append(
-                    {
-                        "variable": var_name,
-                        "year": year,
-                        "season": job_cfg.season,
-                        "local_path": str(local_output),
-                        "gcs_uri": gcs_uri,
-                    }
-                )
-                logger.info("Finished variable %s for year %s", var_name, year)
-                _notify(progress_cb, f"Finished {var_name} ({year})")
+                        try:
+                            with tempfile.TemporaryDirectory(dir=output_dir) as tmp_dir:
+                                raw_result = extractor.extract(
+                                    aoi_geojson=geom_wgs84,
+                                    year=year,
+                                    season=season,
+                                    resolution_m=job_cfg.resolution_m,
+                                    temp_dir=tmp_dir,
+                                    progress_cb=progress_cb,
+                                    should_stop=should_stop,
+                                )
+                                # Allow extractors to optionally return (path, effective_resolution_m)
+                                if isinstance(raw_result, tuple):
+                                    raw_path, effective_res = raw_result
+                                else:
+                                    raw_path, effective_res = raw_result, job_cfg.resolution_m
+                                _notify(
+                                    progress_cb,
+                                    f"{var_name} ({year}, {season}) {aoi_slug}: downloaded raw image {raw_path}",
+                                )
+                                _check_stop()
+
+                                processed_path = transform_fn(
+                                    src_path=raw_path,
+                                    target_crs=job_cfg.target_crs,
+                                    resolution_m=effective_res,
+                                    aoi_geom_target=geom_target,
+                                )
+                                _notify(
+                                    progress_cb,
+                                    f"{var_name} ({year}, {season}) {aoi_slug}: transformed to target CRS/resolution",
+                                )
+                                _check_stop()
+
+                                filename = f"{var_slug}_{year}_{season_slug}_{aoi_slug}.tif"
+                                local_output = output_dir / filename
+                                write_cog(processed_path, local_output)
+                                _notify(
+                                    progress_cb,
+                                    f"{var_name} ({year}, {season}) {aoi_slug}: wrote COG {local_output}",
+                                )
+                                _check_stop()
+
+                                gcs_uri = None
+                                if job_cfg.storage.kind == "gcs_cog":
+                                    _check_stop()
+                                    gcs_uri = upload_to_gcs(
+                                        local_output, job_cfg.storage.bucket, job_cfg.storage.prefix
+                                    )
+                                    logger.info("Uploaded to GCS: %s", gcs_uri)
+                                    _notify(
+                                        progress_cb,
+                                        f"{var_name} ({year}, {season}) {aoi_slug}: uploaded to {gcs_uri}",
+                                    )
+                                    _check_stop()
+
+                                results.append(
+                                    {
+                                        "aoi": aoi_slug,
+                                        "aoi_path": str(Path(aoi_path).resolve()),
+                                        "variable": var_name,
+                                        "year": year,
+                                        "season": season,
+                                        "local_path": str(local_output),
+                                        "gcs_uri": gcs_uri,
+                                    }
+                                )
+                                logger.info(
+                                    "Finished variable %s for year %s season %s (AOI %s)",
+                                    var_name,
+                                    year,
+                                    season,
+                                    aoi_slug,
+                                )
+                                _notify(
+                                    progress_cb,
+                                    f"Finished {var_name} ({year}, {season}) for {aoi_slug}",
+                                )
+                        except PipelineCancelled:
+                            logger.info("Pipeline cancelled by user.")
+                            _notify(progress_cb, "Pipeline stopped by user.")
+                            raise
+                        except Exception as exc:
+                            logger.exception(
+                                "Failed variable %s for year %s season %s (AOI %s)",
+                                var_name,
+                                year,
+                                season,
+                                aoi_slug,
+                            )
+                            _notify(
+                                progress_cb,
+                                f"Failed {var_name} ({year}, {season}) for {aoi_slug}: {exc}",
+                            )
+                            errors.append(
+                                {
+                                    "aoi": aoi_slug,
+                                    "aoi_path": str(aoi_path),
+                                    "variable": var_name,
+                                    "year": year,
+                                    "season": season,
+                                    "error": str(exc),
+                                }
+                            )
+                            continue
     except PipelineCancelled:
         logger.info("Pipeline cancelled by user.")
         _notify(progress_cb, "Pipeline stopped by user.")
         raise
 
-    logger.info("Job %s completed. Outputs: %s", job_cfg.name, results)
-    _notify(progress_cb, "Job completed.")
+    if errors:
+        logger.warning("Job %s completed with %d error(s).", job_cfg.name, len(errors))
+        _notify(progress_cb, f"Job completed with {len(errors)} error(s); see logs for details.")
+    else:
+        logger.info("Job %s completed. Outputs: %s", job_cfg.name, results)
+        _notify(progress_cb, "Job completed.")
     return results
 
 

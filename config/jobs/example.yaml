@@ -5,7 +5,7 @@ job:
   resolution_m: 20
   year: 2023
   season: summer
-  variables: [ndvi, ndmi, msi]
+  variables: [ndvi, ndmi, msi, bsi]
   storage:
     kind: local_cog          # or gcs_cog
     output_dir: data/outputs # used for local_cog
