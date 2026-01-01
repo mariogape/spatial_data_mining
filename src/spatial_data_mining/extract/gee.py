@@ -24,7 +24,7 @@ SEASON_RANGES = {
 }
 
 # Initial tile size (degrees) and the smallest size we'll try when falling back.
-TILE_DEG = 0.4
+TILE_DEG = 0.25
 MIN_TILE_DEG = 0.01
 
 def season_date_range(year: int, season: str) -> Tuple[str, str]:
@@ -47,6 +47,25 @@ class GEEExtractor:
         if cb:
             cb(message)
 
+    @staticmethod
+    def _is_gee_request_limit_error(exc: Exception) -> bool:
+        """
+        Heuristics for GEE errors that typically improve by reducing the number
+        of pixels per request (smaller tiles and/or coarser scale).
+        """
+        msg = str(exc).lower()
+        return any(
+            needle in msg
+            for needle in (
+                "total request size",
+                "user memory limit exceeded",
+                "memory limit exceeded",
+                "too many pixels",
+                "maximum number of pixels",
+                "computation timed out",
+            )
+        )
+
     def _initialize(self) -> None:
         try:
             ee.Initialize()
@@ -54,6 +73,17 @@ class GEEExtractor:
             self.logger.info("Authenticating with Google Earth Engine...")
             ee.Authenticate()
             ee.Initialize()
+
+    def _required_bands(self) -> List[str]:
+        if self.index == "NDVI":
+            return ["B8", "B4"]
+        if self.index == "NDMI":
+            return ["B8", "B11"]
+        if self.index == "MSI":
+            return ["B11", "B8"]
+        if self.index == "BSI":
+            return ["B11", "B4", "B8", "B2"]
+        raise ValueError(f"Unsupported index for GEEExtractor: {self.index}")
 
     def _apply_index(self, image: ee.Image) -> ee.Image:
         if self.index == "NDVI":
@@ -198,7 +228,8 @@ class GEEExtractor:
             .filterDate(start_date, end_date)
             .filter(ee.Filter.lt("CLOUDY_PIXEL_PERCENTAGE", 40))
         )
-        base_image = collection.median()
+        # Keep the reduction as small as possible (reduces GEE memory/timeouts).
+        base_image = collection.select(self._required_bands()).median()
 
         # Apply index; projection will follow the image defaults.
         image = self._apply_index(base_image)
@@ -216,7 +247,7 @@ class GEEExtractor:
             self._notify(progress_cb, f"{name}: downloaded full AOI without tiling")
             return path, effective_res
         except Exception as exc:
-            if "total request size" not in str(exc).lower():
+            if not self._is_gee_request_limit_error(exc):
                 raise
             self.logger.info("Falling back to tiling due to request size limit.")
 
@@ -237,7 +268,6 @@ class GEEExtractor:
             )
 
             tile_paths: List[Path] = []
-            skipped_tiles: List[int] = []
             too_large = False
             for idx, tile_region in enumerate(tile_regions):
                 check_cancelled(should_stop)
@@ -251,7 +281,7 @@ class GEEExtractor:
                         tmp_dir,
                     )
                 except Exception as exc:
-                    if "total request size" in str(exc).lower():
+                    if self._is_gee_request_limit_error(exc):
                         last_exc = exc
                         too_large = True
                         self.logger.info(
@@ -260,13 +290,18 @@ class GEEExtractor:
                             tile_deg,
                         )
                         break
-                    skipped_tiles.append(idx)
-                    self.logger.warning("Skipping tile %s at %.3f°: %s", tile_name, tile_deg, exc)
                     self._notify(
                         progress_cb,
-                        f"{name}: skipped tile {idx + 1}/{total_tiles} ({exc})",
+                        f"{name}: tile {idx + 1}/{total_tiles} failed ({exc}); aborting this attempt",
                     )
-                    continue
+                    for p in tile_paths:
+                        try:
+                            p.unlink()
+                        except FileNotFoundError:
+                            pass
+                        except Exception as cleanup_exc:
+                            self.logger.warning("Could not delete tile %s: %s", p, cleanup_exc)
+                    raise
                 tile_paths.append(tile_path)
                 self._notify(
                     progress_cb,
@@ -286,15 +321,9 @@ class GEEExtractor:
                 self._notify(progress_cb, f"{name}: retrying with smaller tiles ({tile_deg:.3f}°)")
                 continue
 
-            if tile_paths:
+            if tile_paths and len(tile_paths) == total_tiles:
                 merged = self._merge_tiles(tile_paths, name, tmp_dir, should_stop=should_stop)
-                if skipped_tiles:
-                    self._notify(
-                        progress_cb,
-                        f"{name}: merged {len(tile_paths)} of {total_tiles} tiles (skipped {len(skipped_tiles)})",
-                    )
-                else:
-                    self._notify(progress_cb, f"{name}: merged {total_tiles} tiles")
+                self._notify(progress_cb, f"{name}: merged {total_tiles} tiles")
                 return merged, effective_res
 
             tile_deg /= 2

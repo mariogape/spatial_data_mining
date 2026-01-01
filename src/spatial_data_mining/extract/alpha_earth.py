@@ -17,7 +17,7 @@ from affine import Affine
 import numpy as np
 
 # Starting tile size (degrees) for AlphaEarth tiling and the smallest fallback size.
-TILE_DEG = 0.4
+TILE_DEG = 0.25
 MIN_TILE_DEG = 0.005
 
 
@@ -30,6 +30,21 @@ class AlphaEarthExtractor:
     def _notify(cb: Optional[Callable[[str], None]], message: str) -> None:
         if cb:
             cb(message)
+
+    @staticmethod
+    def _is_gee_request_limit_error(exc: Exception) -> bool:
+        msg = str(exc).lower()
+        return any(
+            needle in msg
+            for needle in (
+                "total request size",
+                "user memory limit exceeded",
+                "memory limit exceeded",
+                "too many pixels",
+                "maximum number of pixels",
+                "computation timed out",
+            )
+        )
 
     def _initialize(self) -> None:
         try:
@@ -243,7 +258,7 @@ class AlphaEarthExtractor:
             self._notify(progress_cb, f"{name}: downloaded full AOI without tiling")
             return path, scale
         except Exception as exc:
-            if "total request size" not in str(exc).lower():
+            if not self._is_gee_request_limit_error(exc):
                 raise
             self.logger.info("Falling back to tiling due to request size limit.")
 
@@ -262,7 +277,6 @@ class AlphaEarthExtractor:
             )
 
             tile_paths: List[Path] = []
-            skipped_tiles: List[int] = []
             too_large = False
             for idx, tile_region in enumerate(tile_regions):
                 check_cancelled(should_stop)
@@ -270,7 +284,7 @@ class AlphaEarthExtractor:
                 try:
                     tile_path = self._download_image(image, tile_region, scale, tile_name, tmp_dir)
                 except Exception as exc:
-                    if "total request size" in str(exc).lower():
+                    if self._is_gee_request_limit_error(exc):
                         last_exc = exc
                         too_large = True
                         self.logger.info(
@@ -279,13 +293,18 @@ class AlphaEarthExtractor:
                             tile_deg,
                         )
                         break
-                    skipped_tiles.append(idx)
-                    self.logger.warning("Skipping tile %s at %.3f°: %s", tile_name, tile_deg, exc)
                     self._notify(
                         progress_cb,
-                        f"{name}: skipped tile {idx + 1}/{total_tiles} ({exc})",
+                        f"{name}: tile {idx + 1}/{total_tiles} failed ({exc}); aborting this attempt",
                     )
-                    continue
+                    for p in tile_paths:
+                        try:
+                            p.unlink()
+                        except FileNotFoundError:
+                            pass
+                        except Exception as cleanup_exc:
+                            self.logger.warning("Could not delete tile %s: %s", p, cleanup_exc)
+                    raise
                 tile_paths.append(tile_path)
                 self._notify(progress_cb, f"{name}: downloaded tile {idx + 1}/{total_tiles}")
                 check_cancelled(should_stop)
@@ -302,15 +321,9 @@ class AlphaEarthExtractor:
                 self._notify(progress_cb, f"{name}: retrying with smaller tiles ({tile_deg:.3f}°)")
                 continue
 
-            if tile_paths:
+            if tile_paths and len(tile_paths) == total_tiles:
                 merged = self._merge_tiles(tile_paths, name, tmp_dir, should_stop=should_stop)
-                if skipped_tiles:
-                    self._notify(
-                        progress_cb,
-                        f"{name}: merged {len(tile_paths)} of {total_tiles} tiles (skipped {len(skipped_tiles)})",
-                    )
-                else:
-                    self._notify(progress_cb, f"{name}: merged {total_tiles} tiles")
+                self._notify(progress_cb, f"{name}: merged {total_tiles} tiles")
                 return merged, scale
 
             tile_deg /= 2

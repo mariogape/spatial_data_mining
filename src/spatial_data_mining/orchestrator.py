@@ -1,6 +1,7 @@
 import logging
 import re
 import tempfile
+import uuid
 from pathlib import Path
 from typing import List, Dict, Any, Callable, Optional
 
@@ -20,7 +21,10 @@ ProgressCB = Optional[Callable[[str], None]]
 
 def _notify(cb: ProgressCB, message: str) -> None:
     if cb:
-        cb(message)
+        try:
+            cb(message)
+        except Exception as exc:  # never fail the pipeline due to UI/logging issues
+            logging.getLogger(__name__).warning("Progress callback failed: %s", exc)
 
 
 def _slugify_name(name: str) -> str:
@@ -106,7 +110,11 @@ def _run(
                         transform_fn = var_def["transform"]
 
                         try:
-                            with tempfile.TemporaryDirectory(dir=output_dir) as tmp_dir:
+                            # On Windows, cleanup can fail intermittently due to lingering file handles.
+                            # Cleanup errors should not cause a successful variable run to be reported as failed.
+                            with tempfile.TemporaryDirectory(
+                                dir=output_dir, ignore_cleanup_errors=True
+                            ) as tmp_dir:
                                 raw_result = extractor.extract(
                                     aoi_geojson=geom_wgs84,
                                     year=year,
@@ -141,25 +149,40 @@ def _run(
 
                                 filename = f"{var_slug}_{year}_{season_slug}_{aoi_slug}.tif"
                                 local_output = output_dir / filename
-                                write_cog(processed_path, local_output)
+                                tmp_output = output_dir / f".{filename}.{uuid.uuid4().hex}.tmp.tif"
+
+                                gcs_uri = None
+                                try:
+                                    write_cog(processed_path, tmp_output)
+                                    _check_stop()
+
+                                    if job_cfg.storage.kind == "gcs_cog":
+                                        _check_stop()
+                                        gcs_uri = upload_to_gcs(
+                                            tmp_output, job_cfg.storage.bucket, job_cfg.storage.prefix
+                                        )
+                                        logger.info("Uploaded to GCS: %s", gcs_uri)
+                                        _notify(
+                                            progress_cb,
+                                            f"{var_name} ({year}, {season}) {aoi_slug}: uploaded to {gcs_uri}",
+                                        )
+                                        _check_stop()
+
+                                    # Finalize the local output only after all required steps succeed
+                                    # (e.g., upload for gcs_cog), so incomplete runs don't leave outputs behind.
+                                    tmp_output.replace(local_output)
+                                finally:
+                                    if tmp_output.exists():
+                                        try:
+                                            tmp_output.unlink()
+                                        except Exception:
+                                            pass
+
                                 _notify(
                                     progress_cb,
                                     f"{var_name} ({year}, {season}) {aoi_slug}: wrote COG {local_output}",
                                 )
                                 _check_stop()
-
-                                gcs_uri = None
-                                if job_cfg.storage.kind == "gcs_cog":
-                                    _check_stop()
-                                    gcs_uri = upload_to_gcs(
-                                        local_output, job_cfg.storage.bucket, job_cfg.storage.prefix
-                                    )
-                                    logger.info("Uploaded to GCS: %s", gcs_uri)
-                                    _notify(
-                                        progress_cb,
-                                        f"{var_name} ({year}, {season}) {aoi_slug}: uploaded to {gcs_uri}",
-                                    )
-                                    _check_stop()
 
                                 results.append(
                                     {
